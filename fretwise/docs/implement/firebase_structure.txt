@@ -10,24 +10,22 @@ users
     ├── currentStreak
     ├── totalPracticeMinutes
     ├── profile
-    │   └── main  // 配合 firebase 的架構需要這層
-    │       ├── skillLevel
-    │       ├── experienceSummary
-    │       ├── currentGoals
-    │       ├── weakTechniques
-    │       ├── strongTechniques
-    │       ├── preferredSessionMinutes
-    │       ├── preferredDayAndTime      // to be added
-    │       └── updatedAt
-    ├── preference
-    │   └── main
-    │       ├── favoriteGenres
-    │       ├── favoriteArtists
-    │       ├── dislikedGenres
-    │       ├── dislikedArtists
-    │       ├── preferredMaterialTypes
-    │       ├── tempoPreference
-    │       └── updatedAt
+    │   ├── skillLevel
+    │   ├── experienceSummary
+    │   ├── currentGoals
+    │   ├── weakTechniques
+    │   ├── strongTechniques
+    │   ├── preferredSessionMinutes
+    │   ├── preferredDayAndTime      // to be added
+    │   └── updatedAt
+    ├── preferences
+    │   ├── favoriteGenres
+    │   ├── favoriteArtists
+    │   ├── dislikedGenres
+    │   ├── dislikedArtists
+    │   ├── preferredMaterialTypes
+    │   ├── tempoPreference
+    │   └── updatedAt
     ├── songLibrary  // 每首歌的演奏／練習資訊
     │   └── {songId}
     │       ├── title
@@ -59,7 +57,6 @@ users
     │               ├── requestText
     │               ├── sourceContext
     │               ├── sourceProvider
-    │               ├── generatedFromOverride
     │               └── createdAt
     ├── songProfiles  // 針對使用者 每首歌的難易、重點練習
     │   └── {songId}
@@ -73,6 +70,8 @@ users
     ├── sessions
     │   └── {sessionId}
     │       ├── songId
+    │       ├── practiceDate
+    │       ├── planId
     │       ├── durationSec
     │       ├── userNote
     │       ├── deadlineDate

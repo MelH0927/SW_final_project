@@ -50,7 +50,8 @@ Example:
   "displayName": "Alex",
   "profile": {
     "skillLevel": "beginner",
-    "experienceSummary": "Started acoustic guitar 3 months ago."
+    "experienceSummary": "Started acoustic guitar 3 months ago.",
+    "preferredDayAndTime": "weekday evenings"
   },
   "preferences": {
     "favoriteGenres": ["folk", "classic rock"]

@@ -93,6 +93,7 @@ Fields:
 - `weakTechniques`: list of strings, optional
 - `strongTechniques`: list of strings, optional
 - `preferredSessionMinutes`: number, optional
+- `preferredDayAndTime`: string, optional
 - `updatedAt`: timestamp, required
 
 Example:
@@ -103,7 +104,8 @@ Example:
   "currentGoals": ["play full songs", "improve barre chords"],
   "weakTechniques": ["barre chords", "smooth chord transitions"],
   "strongTechniques": ["open chords"],
-  "preferredSessionMinutes": 20
+  "preferredSessionMinutes": 20,
+  "preferredDayAndTime": "weekday evenings"
 }
 ```
 
