@@ -29,10 +29,11 @@ async function getRealYouTubeVideo(songTitle, artist) {
 }
 
 // --- 巧君負責的功能 1: 搜尋歌曲 ---
-exports.searchSong = onCall({ cors: true, invoker: "public" }, async (request) => {
-  const title = request.data.title || "Unknown";
-  const artist = request.data.artist || "Unknown Artist";
-  const uid = request.auth ? request.auth.uid : "test_user_123";
+async function searchSongSkill(args, uid) {
+  console.log(`[SKILL] searchSong called! uid=${uid} args=${JSON.stringify(args)}`);
+
+  const title = args.title || args.songTitle || "Unknown";
+  const artist = args.artist || args.songArtist || "Unknown Artist";
 
   const realVideoUrl = await getRealYouTubeVideo(title, artist);
 
@@ -62,6 +63,11 @@ exports.searchSong = onCall({ cors: true, invoker: "public" }, async (request) =
   } catch (error) {
     throw new Error(error.message);
   }
+}
+
+exports.searchSong = onCall({ cors: true, invoker: "public" }, async (request) => {
+  const uid = request.auth ? request.auth.uid : "test_user_123";
+  return searchSongSkill(request.data, uid);
 });
 
 // --- Dummy skills (real versions are being implemented by teammates, see docs/ai/overview.md) ---
@@ -95,6 +101,8 @@ exports.updatePlan = onCall({ cors: true, invoker: "public" }, async (request) =
 const coachSkills = {
   generateMaterial: generateMaterialSkill,
   updatePlan: updatePlanSkill,
+  searchSong: searchSongSkill,
+  updateFeed: updateFeedSkill,
 };
 
 const coachToolDeclarations = [
@@ -131,6 +139,64 @@ const coachToolDeclarations = [
         requestContext: {
           type: SchemaType.STRING,
           description: "What schedule change the user asked for, e.g. 'move practice to weekends only'.",
+        },
+      },
+      required: ["requestContext"],
+    },
+  },
+  {
+    name: "searchSong",
+    description:
+      "Search for a song and add it to the user's song library. Call this when the user says they want to add a song, add something to their library, save a song to practice later, or says they are thinking about learning a specific song.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        title: {
+          type: SchemaType.STRING,
+          description: "Song title the user wants to add. Leave empty if the user has not named a specific song.",
+        },
+        artist: {
+          type: SchemaType.STRING,
+          description: "Artist of the song, if known.",
+        },
+        requestContext: {
+          type: SchemaType.STRING,
+          description: "What the user asked for, e.g. 'add Yellow by Coldplay to my library'.",
+        },
+      },
+      required: ["requestContext"],
+    },
+  },
+  {
+    name: "updateFeed",
+    description:
+      "Update the user's inspiration feed and music preferences. Call this when the user says they like or dislike an artist, band, genre, style, or type of music, or gives taste feedback that should affect recommendations.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        likedArtists: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Artists or bands the user says they like.",
+        },
+        dislikedArtists: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Artists or bands the user says they dislike.",
+        },
+        likedGenres: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Genres or styles the user says they like.",
+        },
+        dislikedGenres: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Genres or styles the user says they dislike.",
+        },
+        requestContext: {
+          type: SchemaType.STRING,
+          description: "What taste feedback the user gave, e.g. 'likes Ed Sheeran and acoustic pop'.",
         },
       },
       required: ["requestContext"],
@@ -206,7 +272,9 @@ exports.chatWithCoach = onCall({ cors: true, invoker: "public", secrets: ["GEMIN
     'Give practical, encouraging advice. Keep responses concise (2–4 sentences).',
     'When the user asks for a new or different video, tutorial, exercise, or any practice material — including easier or harder versions — call the generateMaterial tool.',
     'When the user wants to change, cancel, skip, or reschedule a practice session, or says they are too busy or unavailable at a certain time, call the updatePlan tool.',
-    'Never claim that material was generated or the plan was changed unless you actually called the tool in this turn.',
+    'When the user wants to add a song to their library, save a song to practice, or is thinking about learning a specific song, call the searchSong tool.',
+    'When the user says they like or dislike an artist, band, genre, style, or type of music, call the updateFeed tool.',
+    'Never claim that material was generated, the plan was changed, a song was added, or the feed was updated unless you actually called the relevant tool in this turn.',
     libraryContext,
     activeSongContext,
   ].filter(Boolean).join(' ');
@@ -240,14 +308,14 @@ exports.chatWithCoach = onCall({ cors: true, invoker: "public", secrets: ["GEMIN
         console.log(`[chatWithCoach] round=${round} functionCalls=${JSON.stringify(calls)}`);
         if (!calls || calls.length === 0) break;
 
-        const responses = calls.map((call) => {
+        const responses = await Promise.all(calls.map(async (call) => {
           const skill = coachSkills[call.name];
           skillsCalled.push(call.name);
           const response = skill
-            ? skill(call.args, uid)
+            ? await skill(call.args || {}, uid)
             : { status: "error", note: `Unknown skill: ${call.name}` };
           return { functionResponse: { name: call.name, response } };
-        });
+        }));
 
         result = await chat.sendMessage(responses);
       }
@@ -266,9 +334,10 @@ exports.chatWithCoach = onCall({ cors: true, invoker: "public", secrets: ["GEMIN
 });
 
 // --- 巧君負責的功能 2: 更新 Feed (無限延伸 + 隨機版) ---
-exports.updateFeed = onCall({ cors: true, invoker: "public", timeoutSeconds: 120, secrets: ["GEMINI_API_KEY"] }, async (request) => {
+async function updateFeedSkill(args, uid) {
+    console.log(`[SKILL] updateFeed called! uid=${uid} args=${JSON.stringify(args)}`);
+
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const uid = request.auth ? request.auth.uid : "test_user_123";
     const db = admin.firestore();
     const feedCol = db.collection('users').doc(uid).collection('feed');
 
@@ -327,4 +396,9 @@ exports.updateFeed = onCall({ cors: true, invoker: "public", timeoutSeconds: 120
       console.error("Feed 生成錯誤:", error);
       throw new Error("Internal Server Error");
     }
+}
+
+exports.updateFeed = onCall({ cors: true, invoker: "public", timeoutSeconds: 120, secrets: ["GEMINI_API_KEY"] }, async (request) => {
+    const uid = request.auth ? request.auth.uid : "test_user_123";
+    return updateFeedSkill(request.data, uid);
   });
