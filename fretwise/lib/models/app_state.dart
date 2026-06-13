@@ -5,7 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../theme.dart';
 import 'song.dart';
 
-// ======= 保留給「雨蓁」的假日記結構 (等她寫好 Session Firebase 再拿掉) =======
+
 class DiaryEntry {
   final DateTime date;
   final String title;
@@ -64,7 +64,32 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  // --- 💡 巧君專屬區：Firebase & AI Workflows ---
+  //ccc
+   String? _highlightedSongId;
+    String? get highlightedSongId => _highlightedSongId;
+
+    void setHighlightedSong(String? id) {
+      _highlightedSongId = id;
+      notifyListeners();
+    }
+  Future<String?> findExistingSongId(String title, String artist) async {
+    final uid = currentUserId;
+    final query = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('songLibrary')
+        .where('title', isEqualTo: title)
+        .where('artist', isEqualTo: artist)
+        .limit(1)
+        .get();
+
+    if (query.docs.isNotEmpty) {
+      return query.docs.first.id;
+    }
+    return null;
+  }
+
+  
   
   String get currentUserId => FirebaseAuth.instance.currentUser?.uid ?? 'test_user_123';
 
@@ -96,9 +121,23 @@ class AppState extends ChangeNotifier {
 // ... 其他部分不變
 
 // Library Page: 呼叫 AI 搜尋歌曲資訊
-  Future<void> searchSongToLibrary(String title, String artist) async {
+  Future<SongEntry?> searchSongToLibrary(String title, String artist) async {
     _isLoadingAddSong = true;
     notifyListeners();
+
+    final existingId = await findExistingSongId(title, artist);
+    if (existingId != null) {
+      print('ℹ️ 歌曲已存在，準備進入練習頁面');
+      _isLoadingAddSong = false;
+      notifyListeners();
+      
+      // 💡 取得已存在的歌曲資料回傳
+      final doc = await FirebaseFirestore.instance
+          .collection('users').doc(currentUserId)
+          .collection('songLibrary').doc(existingId).get();
+      return SongEntry.fromFirestore(doc);
+    }
+
     try {
       // 呼叫雲端 Function
       final result = await FirebaseFunctions.instance.httpsCallable('searchSong').call({
@@ -106,12 +145,15 @@ class AppState extends ChangeNotifier {
         'artist': artist,
       });
       
-      // 💡 雲端成功回傳後，印出真實的教學影片連結！
-      print('----------------------------------------');
-      print('✅ 雲端 AI 成功找到教學影片！');
-      print('🎵 歌曲: $title');
-      print('🔗 真實教學連結: ${result.data['videoUrl']}');
-      print('----------------------------------------');
+       if (result.data['songId'] != null) {
+        final newId = result.data['songId'];
+        // 💡 取得剛新增成功的歌曲資料回傳
+        final doc = await FirebaseFirestore.instance
+            .collection('users').doc(currentUserId)
+            .collection('songLibrary').doc(newId).get();
+        
+        return SongEntry.fromFirestore(doc);
+      }
       
     } catch (e) {
       print('⚠️ 雲端失敗，進入本地保險機制: $e');
@@ -120,6 +162,7 @@ class AppState extends ChangeNotifier {
       _isLoadingAddSong = false;
       notifyListeners();
     }
+     return null;
   }
 
   // 2. 修正按讚取消邏輯
