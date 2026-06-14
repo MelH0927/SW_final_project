@@ -9,16 +9,12 @@
     "logs": "firebase functions:log"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "dependencies": {
-<<<<<<< HEAD
-    "firebase-admin": "^14.0.0",
-=======
     "@google/generative-ai": "^0.24.1",
-    "firebase-admin": "^13.6.0",
->>>>>>> 6761ca8d8636d10c4dc4143c9ed4e756044245db
+    "firebase-admin": "^13.10.0",
     "firebase-functions": "^7.0.0"
   },
   "devDependencies": {
