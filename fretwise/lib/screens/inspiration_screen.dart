@@ -209,7 +209,24 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   ),
-                  onPressed: () {
+                  onPressed: () async {
+                    final existingId = await widget.appState.findExistingSongId(
+                      widget.item.title, 
+                      widget.item.artist
+                    );
+                    if (existingId != null) {
+                      // 1. 如果已存在，設定高亮 ID
+                      widget.appState.setHighlightedSong(existingId);
+                      // 2. 直接跳轉到 Library
+                      widget.navigate('library');
+                      print('🔍 發現重複，跳轉至 Library 並發光');
+                    } else {
+                    await widget.appState.searchSongToLibrary(widget.item.title, widget.item.artist);
+                      widget.navigate('practicing', props: {
+                        'title': widget.item.title,
+                        'artist': widget.item.artist,
+                      });
+                    }
                     // 💡 點擊練習，自動將歌加入 Library，並跳轉
                     widget.appState.searchSongToLibrary(widget.item.title, widget.item.artist);
                     widget.navigate('practicing', props: {'title': widget.item.title});
@@ -217,6 +234,22 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
                   child: const Text("Let's practice", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
                 ),
               ),
+              const SizedBox(height: 12),
+              Center(
+                child: GestureDetector(
+                  onTap: () => widget.navigate('library'),
+                  child: const Text(
+                    'Go to my library',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white70,
+                      decoration: TextDecoration.underline, // 加上底線
+                      decorationColor: Colors.white38,
+                    ),
+                  ),
+                ),
+              )
             ],
           ),
         ),

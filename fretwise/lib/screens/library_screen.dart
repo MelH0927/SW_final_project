@@ -36,6 +36,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   AppTheme get t => widget.t;
 
+  void _scrollToId(String songId) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final key = _cardKeys[songId];
+      if (key?.currentContext != null) {
+        Scrollable.ensureVisible(
+          key!.currentContext!,
+          duration: const Duration(milliseconds: 600),
+          curve: Curves.elasticOut, 
+          alignment: 0.3,
+        );
+      }
+    });
+  }
+
   @override
   void dispose() {
     _titleCtrl.dispose();
@@ -73,15 +87,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _addError = null;
     });
 
-    // 呼叫 AppState 的 AI 搜尋功能
-    await appState.searchSongToLibrary(title, artist);
+    final newSong = await appState.searchSongToLibrary(title, artist);
 
-    setState(() {
+     if (newSong != null && mounted) {
+      widget.navigate('practicing', props: {
+        'title': newSong.title,
+        'artist': newSong.artist,
+        'bpm': newSong.bpm,
+        'songId': newSong.id,
+      });
+      
+      // 清空輸入框
       _titleCtrl.clear();
       _artistCtrl.clear();
-    });
-    
-    _scrollToSong(title);
+    } else {
+      // 如果失敗，可以留在原位並顯示提示（選擇性）
+      print('❌ 無法進入練習頁面');
+    }
   }
 
   List<SongEntry> _getVisibleSongs(List<SongEntry> allSongs) {
@@ -133,6 +155,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
+
+    if (appState.highlightedSongId != null) {
+      final id = appState.highlightedSongId!;
+      _scrollToId(id);
+      
+      // 延遲一下下就把 ID 清掉，避免重複觸發捲動
+      Future.delayed(const Duration(seconds: 2), () {
+        appState.setHighlightedSong(null);
+      });
+    }
 
     return Stack(
       children: [
@@ -347,10 +379,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               ),
                             for (final s in songs) ...[
                               _SongCard(
-                                key: ValueKey(s.id),
+                                key: _cardKeys.putIfAbsent(s.id, () => GlobalKey()),
                                 song: s,
                                 t: t,
-                                isHighlighted: _highlightedSong == s.title,
+                                isHighlighted: appState.highlightedSongId == s.id,
                                 onTap: () => widget.navigate('practicing', props: {
                                   'title': s.title,
                                   'artist': s.artist,
