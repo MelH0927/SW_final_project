@@ -12,15 +12,10 @@ android {
     namespace = "com.fretwise.fretwise"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
-    buildToolsVersion = flutter.buildToolsVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
@@ -45,4 +40,10 @@ android {
 
 flutter {
     source = "../.."
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
