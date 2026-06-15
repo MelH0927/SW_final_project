@@ -458,30 +458,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                 ),
                                 song: s,
                                 t: t,
-                                isHighlighted:
-                                    appState.highlightedSongId == s.id,
+                                isHighlighted: appState.highlightedSongId == s.id,
                                 onTap: () => widget.navigate(
                                   'practicing',
                                   props: {
                                     'title': s.title,
                                     'artist': s.artist,
                                     'bpm': s.bpm,
+                                    'videoUrl': s.videoUrl,
                                     'songId': s.id,
                                   },
                                 ),
-                                onFavToggle: () => appState.updateSongStatus(
-                                  s.id,
-                                  {'isFavorite': !s.isFavorite},
-                                ),
+                                onFavToggle: () => appState.updateSongStatus(s.id, {'isFavorite': !s.isFavorite}),
                                 onArchive: !_filterArchived
-                                    ? () => appState.updateSongStatus(s.id, {
-                                        'isArchived': true,
-                                      })
+                                    ? () => appState.updateSongStatus(s.id, {'isArchived': true})
                                     : null,
                                 onUnarchive: _filterArchived
-                                    ? () => appState.updateSongStatus(s.id, {
-                                        'isArchived': false,
-                                      })
+                                    ? () => appState.updateSongStatus(s.id, {'isArchived': false})
                                     : null,
                               ),
                               const SizedBox(height: 10),

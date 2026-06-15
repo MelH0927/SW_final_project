@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import '../theme.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 typedef ChatMessage = ({String role, String text});
 
@@ -62,6 +63,7 @@ class _AIChatScreenState extends State<AIChatScreen> {
   final _scrollCtrl = ScrollController();
   late final FocusNode _inputFocus;
   bool _loading = false;
+  List<Map<String, String>>? _capturedHistory;  // 用來傳回 PracticingScreen
 
   AppTheme get t => widget.t;
 
@@ -279,6 +281,8 @@ class _AIChatScreenState extends State<AIChatScreen> {
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     _inputFocus.dispose();
+    // 把對話歷史傳回去給 PracticingScreen 如果需要的話
+    _capturedHistory = _messages.map((m) => {'role': m.role, 'text': m.text}).toList();
     super.dispose();
   }
 

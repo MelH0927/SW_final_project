@@ -1,8 +1,10 @@
-const { onCall } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { setGlobalOptions } = require("firebase-functions/v2/options");
 const admin = require("firebase-admin");
 const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
 
 admin.initializeApp();
+setGlobalOptions({ maxInstances: 10 });
 
 // Mirrors lib/utils/song_id.dart — must stay in sync
 function makeSongId(title, artist) {
@@ -425,3 +427,115 @@ exports.updateFeed = onCall({ cors: true, invoker: "public", timeoutSeconds: 120
     const uid = request.auth ? request.auth.uid : "test_user_123";
     return updateFeedSkill(request.data, uid);
   });
+
+exports.recordSession = onCall({ cors: true, invoker: 'public', secrets: ['GEMINI_API_KEY'] }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "You must be logged in to record a session.");
+  }
+
+  const uid = request.auth.uid;
+  const data = request.data || {};
+  const song = data.song || {};
+  const userThoughts = data.userThoughts || {};
+
+  const userNote = userThoughts.userNote || "No specific thoughts shared.";
+  const durationMin = Math.round((userThoughts.durationSec || 0) / 60);
+  const chatHistory = userThoughts.chatHistory || [];
+
+  let chatHistoryText = chatHistory.map(m => {
+    const roleLabel = m.role === 'user' ? 'Student' : 'AI Coach';
+    return `${roleLabel}: ${m.text}`;
+  }).join("\n");
+
+  if (chatHistory.length === 0) {
+    chatHistoryText = "(No chat interactions during this session)";
+  }
+
+  let aiComment = `Great job practicing ${durationMin} minutes of "${song.title || 'this song'}"! Keep up this great momentum, and focus on smooth chord transitions in your next session.`;
+  let nextFocus = ["Smooth out chord transitions.", "Practice with a metronome for consistency."];
+
+  try {
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn("GEMINI_API_KEY is not defined in the environment. Using fallback comments.");
+    } else {
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+      const prompt = `You are an expert guitar practice coach (AI Coach).
+The student just finished practicing "${song.title || 'Unknown'}" by "${song.artist || 'Unknown'}".
+Session duration: ${durationMin} minutes.
+Student's feedback/note: "${userNote}".
+
+Below is the dynamic chat log between the Student and you (AI Coach) during this session:
+${chatHistoryText}
+
+Analyze the chat log and student's note to find their specific pain points (e.g., fingering difficulty, hand fatigue, or chord transitions).
+Provide a highly personalized coaching summary (aiComment) in 2-3 sentences addressing these specific issues, and list exactly 2 concise next-focus tips (nextFocus).
+
+Return ONLY a valid JSON object. Do NOT include markdown formatting like \`\`\`json.
+Expected JSON structure:
+{"aiComment": "your personalized feedback text", "nextFocus": ["tip1", "tip2"]}`;
+
+      const result = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      });
+
+      const responseText = result.response?.text?.()?.trim() || result.response?.text?.trim() || "{}";
+      const aiJson = JSON.parse(responseText);
+
+      if (aiJson.aiComment) aiComment = aiJson.aiComment;
+      if (Array.isArray(aiJson.nextFocus) && aiJson.nextFocus.length > 0) nextFocus = aiJson.nextFocus;
+
+      console.log("Successfully generated dynamic AI Coach feedback from Gemini.");
+    }
+  } catch (error) {
+    console.error("AI generation failed, falling back to default comments:", error);
+  }
+
+  const sessionData = {
+    title: song.title || 'Unknown',
+    artist: song.artist || 'Unknown',
+    practiceDate: userThoughts.practiceDate || new Date().toISOString().split('T')[0],
+    durationSec: userThoughts.durationSec || 0,
+    userNote: userThoughts.userNote || '',
+    recordingUrls: userThoughts.recordingUrls || [],
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    sessionInfo: { aiComment, nextFocus },
+  };
+
+  await admin.firestore()
+    .collection("users")
+    .doc(uid)
+    .collection("sessions")
+    .add(sessionData);
+
+  return { status: "success", sessionInfo: { aiComment, nextFocus } };
+});
+
+exports.applyPatch = onCall({ cors: true, invoker: 'public' }, async (request) => {
+  const uid = request.auth?.uid || 'test_user_123';
+  const data = request.data || {};
+  const userProfilePatch = data.userProfilePatch || {};
+  const songProfilePatch = data.songProfilePatch || {};
+  const song = data.song || {};
+  const db = admin.firestore();
+  const promises = [];
+
+  if (Object.keys(userProfilePatch).length) {
+    promises.push(db.collection('users').doc(uid).set({ profile: userProfilePatch }, { merge: true }));
+  }
+
+  if (Object.keys(songProfilePatch).length && song.title && song.artist) {
+    const songId = makeSongId(song.title, song.artist);
+    promises.push(db.collection('users').doc(uid).collection('songProfiles').doc(songId).set(songProfilePatch, { merge: true }));
+  }
+
+  try {
+    await Promise.all(promises);
+    return { success: true };
+  } catch (error) {
+    console.error('applyPatch failed:', error);
+    throw new Error('Failed to apply patch');
+  }
+});
