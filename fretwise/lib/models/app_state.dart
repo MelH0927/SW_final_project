@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -227,59 +228,73 @@ class AppState extends ChangeNotifier {
 class AiMaterialService extends ChangeNotifier {
   Map<String, dynamic>? _currentMaterial;
   bool _isGenerating = false;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
 
-  // 供 UI 讀取目前的教材與生成狀態
   Map<String, dynamic>? get currentMaterial => _currentMaterial;
   bool get isGenerating => _isGenerating;
 
-  Future<void> generateMaterial({
+  /// Subscribes to live Firestore updates for the active song's practice material.
+  /// Any write by the Cloud Function is pushed here immediately via the listener.
+  void generateMaterial({
     required String songId,
     required String song,
     required String artist,
     String? preference,
-  }) async {
-    if (_isGenerating) return;
+  }) {
+    _sub?.cancel();
+    if (songId.isEmpty) return;
 
     _isGenerating = true;
     notifyListeners();
 
-    debugPrint('➔ [AI Service] Loading practice material for $song ($artist)...');
+    debugPrint('➔ [AI Service] Listening to practice material for $song ($artist)...');
 
-    try {
-      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'test_user_123';
-      final snap = await FirebaseFirestore.instance
-          .collection('users').doc(uid)
-          .collection('songLibrary').doc(songId)
-          .collection('practiceMaterials')
-          .where('active', isEqualTo: true)
-          .where('type', isEqualTo: 'video')
-          .limit(1)
-          .get();
-
-      if (snap.docs.isNotEmpty) {
-        final data = snap.docs.first.data();
-        _currentMaterial = {
-          'type': 'video',
-          'title': data['title'] ?? '$song — Tutorial',
-          'url': data['videoUrl'] ?? '',
-        };
-        debugPrint('➔ [AI Service] Loaded video: ${_currentMaterial!['url']}');
-      } else {
-        _currentMaterial = null;
-        debugPrint('➔ [AI Service] No practice material found for songId=$songId');
-      }
-    } catch (e) {
-      debugPrint('➔ [AI Service] Error loading material: $e');
-    } finally {
-      _isGenerating = false;
-      notifyListeners();
-    }
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'test_user_123';
+    _sub = FirebaseFirestore.instance
+        .collection('users').doc(uid)
+        .collection('songLibrary').doc(songId)
+        .collection('practiceMaterials')
+        .where('active', isEqualTo: true)
+        .where('type', isEqualTo: 'video')
+        .limit(1)
+        .snapshots()
+        .listen(
+          (snap) {
+            if (snap.docs.isNotEmpty) {
+              final data = snap.docs.first.data();
+              _currentMaterial = {
+                'type': 'video',
+                'title': data['title'] ?? '$song — Tutorial',
+                'url': data['videoUrl'] ?? '',
+              };
+              debugPrint('➔ [AI Service] Material updated: ${_currentMaterial!['url']}');
+            } else {
+              _currentMaterial = null;
+              debugPrint('➔ [AI Service] No active material for songId=$songId');
+            }
+            _isGenerating = false;
+            notifyListeners();
+          },
+          onError: (e) {
+            debugPrint('➔ [AI Service] Stream error: $e');
+            _isGenerating = false;
+            notifyListeners();
+          },
+        );
   }
 
-  /// 重置教材（例如換別首歌時）
+  /// Cancels the listener and clears state (call when leaving the practicing screen).
   void reset() {
+    _sub?.cancel();
+    _sub = null;
     _currentMaterial = null;
     _isGenerating = false;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
   }
 }

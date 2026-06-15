@@ -26,26 +26,51 @@ async function getRealYouTubeVideo(songTitle, artist, excludeUrls = new Set(), m
     if (wantsLong)  durationParam = '&sp=EgIYAg%3D%3D'; // >20 min
     if (wantsShort) durationParam = '&sp=EgIYAQ%3D%3D'; // <4 min
 
-    const html = await fetch(`https://www.youtube.com/results?search_query=${query}${durationParam}`)
-      .then(r => r.text());
+    // User-Agent avoids basic bot-detection that Cloud Function IPs trigger on YouTube
+    const html = await fetch(
+      `https://www.youtube.com/results?search_query=${query}${durationParam}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      }
+    ).then(r => r.text());
 
     // Only collect Shorts IDs to skip when user explicitly wants long-form video
     const shortsIds = wantsLong
       ? new Set([...html.matchAll(/\/shorts\/([a-zA-Z0-9_-]{11})/g)].map(m => m[1]))
       : new Set();
 
-    const seen = new Set();
-    for (const [, id] of html.matchAll(/watch\?v=([a-zA-Z0-9_-]{11})/g)) {
-      if (seen.has(id) || shortsIds.has(id)) continue;
-      seen.add(id);
+    // Collect IDs from both watch?v= URLs and embedded ytInitialData JSON for robustness
+    const ids = new Set();
+    for (const [, id] of html.matchAll(/watch\?v=([a-zA-Z0-9_-]{11})/g)) ids.add(id);
+    for (const [, id] of html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)) ids.add(id);
+
+    console.log(`[YouTube] query="${songTitle} ${artist}", candidates=${ids.size}, excludeCount=${excludeUrls.size}`);
+
+    for (const id of ids) {
+      if (shortsIds.has(id)) continue;
       const url = `https://www.youtube.com/watch?v=${id}`;
       if (!excludeUrls.has(url)) return url;
     }
+    console.warn(`[YouTube] all ${ids.size} candidates excluded`);
   } catch (error) {
     console.error("YouTube 搜尋失敗:", error);
   }
-  const fallback = "https://www.youtube.com/watch?v=mYpXn-P8y_4"; // 備用 Blackbird
-  return excludeUrls.has(fallback) ? null : fallback;
+
+  // Multiple fallbacks so one exhausted URL doesn't block all future generation
+  const fallbacks = [
+    "https://www.youtube.com/watch?v=mYpXn-P8y_4",
+    "https://www.youtube.com/watch?v=bx1Bh8ZvH84",
+    "https://www.youtube.com/watch?v=xkVNbOCXUIU",
+    "https://www.youtube.com/watch?v=QB7ACr7pUuE",
+    "https://www.youtube.com/watch?v=Kx7B-XvmFtE",
+  ];
+  for (const fb of fallbacks) {
+    if (!excludeUrls.has(fb)) return fb;
+  }
+  return null;
 }
 
 // --- 巧君負責的功能 1: 搜尋歌曲 ---
@@ -222,8 +247,27 @@ async function generateMaterialSkill(args, uid, context) {
   }
 
   const preferredType = (args.preferredMaterialTypes || [])[0] || 'video';
-  const existingTitlesLower = new Set(existingMaterials.map(m => (m.title || '').toLowerCase().trim()));
   const existingUrls = new Set(existingMaterials.map(m => m.videoUrl).filter(Boolean));
+  const urlRules = args.materialRules || storedMaterialRules || '';
+
+  // Step 1: Find a YouTube URL FIRST — independent of Gemini.
+  // Gemini's canFind=false used to abort here, but that blocked valid new URLs.
+  let videoUrl = null;
+  if (preferredType === 'video') {
+    videoUrl = await getRealYouTubeVideo(songTitle, songArtist || '', existingUrls, urlRules);
+    if (!videoUrl) {
+      console.warn(`[generateMaterial] aborting — YouTube scraper returned no new URL (all exhausted)`);
+      return { status: "ok", note: "sorry I really can't find new materials" };
+    }
+    console.log(`[generateMaterial] YouTube URL found: ${videoUrl}`);
+  }
+
+  // Step 2: Ask Gemini for a descriptive title/description (optional).
+  // If Gemini fails or returns a duplicate title, we fall back to a generic title
+  // and still write to Firestore — the URL is what matters.
+  const existingTitlesLower = new Set(existingMaterials.map(m => (m.title || '').toLowerCase().trim()));
+  let materialTitle = `${songTitle} — Guitar Tutorial`;
+  let materialDescription = '';
 
   try {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -235,8 +279,6 @@ async function generateMaterialSkill(args, uid, context) {
 
     const contextLine = args.requestContext ? ` The user asked: "${args.requestContext}".` : '';
 
-    // Build the rules section. When both stored and new rules exist, include both and
-    // bundle the subset check into this same call to avoid an extra round-trip.
     let rulesSection = '';
     let subsetCheckInstructions = '';
     let subsetCheckJsonFields = '';
@@ -258,59 +300,52 @@ async function generateMaterialSkill(args, uid, context) {
 Existing materials already saved for this song — do NOT duplicate any of these:
 ${existingSummary}
 
-Suggest ONE new ${preferredType} resource for this specific song that is clearly distinct from the list above and matches the material preference.
-If no genuinely new resource exists, set "canFind" to false.${subsetCheckInstructions}
+Suggest a descriptive title and one-sentence description for a NEW ${preferredType} guitar resource for this song, clearly distinct from the list above.${subsetCheckInstructions}
 
 Return ONLY a JSON object with no markdown:
-{"canFind": true, "type": "${preferredType}", "title": "specific title", "description": "one-sentence description"${subsetCheckJsonFields}}
-or
-{"canFind": false${subsetCheckJsonFields}}`;
+{"title": "specific title", "description": "one-sentence description"${subsetCheckJsonFields}}`;
 
     const result = await model.generateContent(prompt);
     const text = result.response.text().trim();
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in Gemini response');
+    if (jsonMatch) {
+      const suggestion = JSON.parse(jsonMatch[0]);
 
-    const suggestion = JSON.parse(jsonMatch[0]);
+      // Write materialRules update only if Gemini says the new preference adds information
+      if (needsSubsetCheck && suggestion.rulesUpdated && suggestion.mergedRules) {
+        try {
+          await db.collection('users').doc(uid).set(
+            { preferences: { materialRules: suggestion.mergedRules } },
+            { merge: true }
+          );
+        } catch (e) {
+          console.error('generateMaterial: materialRules merge write failed:', e);
+        }
+      }
 
-    // Write materialRules update only if Gemini says the new preference adds information
-    if (needsSubsetCheck && suggestion.rulesUpdated && suggestion.mergedRules) {
-      try {
-        await db.collection('users').doc(uid).set(
-          { preferences: { materialRules: suggestion.mergedRules } },
-          { merge: true }
-        );
-      } catch (e) {
-        console.error('generateMaterial: materialRules merge write failed:', e);
+      if (suggestion.title && !existingTitlesLower.has(suggestion.title.toLowerCase().trim())) {
+        materialTitle = suggestion.title;
+        materialDescription = suggestion.description || '';
+      } else if (suggestion.title) {
+        console.warn(`[generateMaterial] Gemini title "${suggestion.title}" is a duplicate — using generic title`);
       }
     }
+    console.log(`[generateMaterial] material title="${materialTitle}"`);
+  } catch (e) {
+    console.warn(`[generateMaterial] Gemini metadata call failed (using generic title): ${e.message}`);
+  }
 
-    if (!suggestion.canFind || existingTitlesLower.has((suggestion.title || '').toLowerCase().trim())) {
-      console.warn(`[generateMaterial] aborting — canFind=${suggestion.canFind} titleDuplicate=${existingTitlesLower.has((suggestion.title || '').toLowerCase().trim())} suggestedTitle="${suggestion.title}"`);
-      return { status: "ok", note: "sorry I really can't find new materials" };
-    }
-    console.log(`[generateMaterial] Gemini suggests title="${suggestion.title}" type="${suggestion.type}"`);
+  // Step 3: Write to Firestore — always reached as long as a URL was found.
+  const materialData = {
+    type: preferredType,
+    title: materialTitle,
+    description: materialDescription,
+    active: true,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (videoUrl) materialData.videoUrl = videoUrl;
 
-    const materialData = {
-      type: suggestion.type || preferredType,
-      title: suggestion.title,
-      description: suggestion.description || '',
-      active: true,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    if (suggestion.type === 'video' || preferredType === 'video') {
-      // Use the most up-to-date rules (merged > new > stored) so the scraper can honour them
-      const urlRules = suggestion.mergedRules || args.materialRules || storedMaterialRules || '';
-      const videoUrl = await getRealYouTubeVideo(songTitle, songArtist || '', existingUrls, urlRules);
-      if (!videoUrl) {
-        console.warn(`[generateMaterial] aborting — YouTube scraper returned no new URL (all exhausted)`);
-        return { status: "ok", note: "sorry I really can't find new materials" };
-      }
-      console.log(`[generateMaterial] YouTube URL found: ${videoUrl}`);
-      materialData.videoUrl = videoUrl;
-    }
-
+  try {
     const batch = db.batch();
     for (const m of existingMaterials) {
       if (m.active) batch.update(m.ref, { active: false });
@@ -318,11 +353,11 @@ or
     const newMatRef = songDocRef.collection('practiceMaterials').doc();
     batch.set(newMatRef, materialData);
     await batch.commit();
-    console.log(`[generateMaterial] ✅ batch committed — new material "${suggestion.title}" written to Firestore`);
-    return { status: "ok", materialAdded: true, title: suggestion.title };
+    console.log(`[generateMaterial] ✅ batch committed — new material "${materialTitle}" written to Firestore`);
+    return { status: "ok", materialAdded: true, title: materialTitle };
   } catch (e) {
-    console.error('generateMaterial: Gemini suggestion failed:', e);
-    return { status: "ok", note: "sorry I really can't find new materials" };
+    console.error('generateMaterial: batch write failed:', e);
+    return { status: "ok", note: "Material found but could not be saved." };
   }
 }
 

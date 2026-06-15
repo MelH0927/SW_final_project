@@ -228,18 +228,6 @@ class _FretwiseShellState extends State<FretwiseShell> {
 
   void _closeAI() {
     _saveActivePracticingChat();
-    // Re-fetch practice material in case AI wrote a new one to Firestore.
-    if (_prevScreen == 'practicing') {
-      final props = _screenProps ?? {};
-      final songId = props['songId'] as String? ?? '';
-      if (songId.isNotEmpty) {
-        context.read<AiMaterialService>().generateMaterial(
-          songId: songId,
-          song: props['title'] as String? ?? '',
-          artist: props['artist'] as String? ?? '',
-        );
-      }
-    }
     setState(() {
       _showAI = false;
       _aiSongTitle = null;

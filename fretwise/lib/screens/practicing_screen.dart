@@ -383,6 +383,7 @@ class _PracticingScreenState extends State<PracticingScreen> {
     final practiceMaterial = aiService.currentMaterial;
 
     final String videoUrl =
+    aiService.currentMaterial?['url'] ??
     widget.videoUrl ??
     widget.practiceMaterial?['url'] ??
     'https://www.youtube.com/watch?v=bx1Bh8ZvH84';
