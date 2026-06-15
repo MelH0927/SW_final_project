@@ -12,22 +12,40 @@ function makeSongId(title, artist) {
   return base.replace(/[^a-z0-9_\-]/g, '_');
 }
 
-// 🛠️ 真實 YouTube 爬蟲
-async function getRealYouTubeVideo(songTitle, artist) {
+// 🛠️ 真實 YouTube 爬蟲 — returns the first non-duplicate result, or null if all exhausted.
+// Duration filtering and Shorts handling are driven by materialRules only when explicitly stated.
+async function getRealYouTubeVideo(songTitle, artist, excludeUrls = new Set(), materialRules = '') {
   try {
     const query = encodeURIComponent(`${songTitle} ${artist} 吉他教學 guitar tutorial`);
-    const searchUrl = `https://www.youtube.com/results?search_query=${query}`;
-    const response = await fetch(searchUrl);
-    const html = await response.text();
+    const rulesLower = materialRules.toLowerCase();
+    const wantsLong  = rulesLower.includes('long');
+    const wantsShort = rulesLower.includes('short');
 
-    const match = html.match(/watch\?v=([a-zA-Z0-9_-]{11})/);
-    if (match && match[1]) {
-      return `https://www.youtube.com/watch?v=${match[1]}`;
+    // Only apply a duration filter when the user explicitly says long or short
+    let durationParam = '';
+    if (wantsLong)  durationParam = '&sp=EgIYAg%3D%3D'; // >20 min
+    if (wantsShort) durationParam = '&sp=EgIYAQ%3D%3D'; // <4 min
+
+    const html = await fetch(`https://www.youtube.com/results?search_query=${query}${durationParam}`)
+      .then(r => r.text());
+
+    // Only collect Shorts IDs to skip when user explicitly wants long-form video
+    const shortsIds = wantsLong
+      ? new Set([...html.matchAll(/\/shorts\/([a-zA-Z0-9_-]{11})/g)].map(m => m[1]))
+      : new Set();
+
+    const seen = new Set();
+    for (const [, id] of html.matchAll(/watch\?v=([a-zA-Z0-9_-]{11})/g)) {
+      if (seen.has(id) || shortsIds.has(id)) continue;
+      seen.add(id);
+      const url = `https://www.youtube.com/watch?v=${id}`;
+      if (!excludeUrls.has(url)) return url;
     }
   } catch (error) {
     console.error("YouTube 搜尋失敗:", error);
   }
-  return "https://www.youtube.com/watch?v=mYpXn-P8y_4"; // 備用 Blackbird
+  const fallback = "https://www.youtube.com/watch?v=mYpXn-P8y_4"; // 備用 Blackbird
+  return excludeUrls.has(fallback) ? null : fallback;
 }
 
 // --- 巧君負責的功能 1: 搜尋歌曲 ---
@@ -74,16 +92,226 @@ exports.searchSong = onCall({ cors: true, invoker: "public" }, async (request) =
 
 // --- Dummy skills (real versions are being implemented by teammates, see docs/ai/overview.md) ---
 // These are also exported as onCall so Flutter can call them directly once real implementations land.
-function generateMaterialSkill(args, uid) {
-  console.log(`[DUMMY SKILL] generateMaterial called! uid=${uid} args=${JSON.stringify(args)}`);
-  return {
-    status: "ok",
-    note: "generateMaterial is not implemented yet (dummy was called). Tell the user their new practice material is being prepared.",
-  };
+async function generateMaterialSkill(args, uid, context) {
+  console.log(`[SKILL] generateMaterial called! uid=${uid} args=${JSON.stringify(args)}`);
+
+  const db = admin.firestore();
+  const { activeSongTitle: ctxTitle, activeSongArtist: ctxArtist } = context || {};
+  const songTitle  = args.songTitle  || ctxTitle  || null;
+  const songArtist = args.songArtist || ctxArtist || null;
+
+  // Read stored materialRules so we can check for subset and always include them in the prompt
+  let storedMaterialRules = null;
+  try {
+    const userSnap = await db.collection('users').doc(uid).get();
+    if (userSnap.exists) storedMaterialRules = userSnap.data()?.preferences?.materialRules || null;
+  } catch (e) {
+    console.error('generateMaterial: failed to read stored preferences:', e);
+  }
+
+  // preferredMaterialTypes (format) — safe to overwrite, no subset check needed
+  if (args.preferredMaterialTypes?.length) {
+    try {
+      await db.collection('users').doc(uid).set(
+        { preferences: { preferredMaterialTypes: args.preferredMaterialTypes } },
+        { merge: true }
+      );
+    } catch (e) {
+      console.error('generateMaterial: preferredMaterialTypes write failed:', e);
+    }
+  }
+
+  // materialRules (qualitative): if no stored rules yet, write immediately.
+  // If stored rules exist, we do the subset check inside the Gemini call below.
+  const needsSubsetCheck = !!args.materialRules && !!storedMaterialRules;
+  if (args.materialRules && !storedMaterialRules) {
+    try {
+      await db.collection('users').doc(uid).set(
+        { preferences: { materialRules: args.materialRules } },
+        { merge: true }
+      );
+    } catch (e) {
+      console.error('generateMaterial: materialRules write failed:', e);
+    }
+  }
+
+  // Without a known song, still run the subset check (separate call) then return
+  if (!songTitle) {
+    if (needsSubsetCheck) {
+      try {
+        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        const res = await model.generateContent(
+          `Stored material rules: "${storedMaterialRules}"\n` +
+          `New user preference: "${args.materialRules}"\n\n` +
+          `Does the new preference add anything not already covered by the stored rules?\n` +
+          `Return ONLY JSON (no markdown):\n` +
+          `{"isSubset": true} — new preference already covered, no update needed\n` +
+          `{"isSubset": false, "merged": "concise combined phrase"} — new info found`
+        );
+        const m = res.response.text().trim().match(/\{[\s\S]*\}/);
+        if (m) {
+          const check = JSON.parse(m[0]);
+          if (!check.isSubset && check.merged) {
+            await db.collection('users').doc(uid).set(
+              { preferences: { materialRules: check.merged } },
+              { merge: true }
+            );
+          }
+        }
+      } catch (e) {
+        console.error('generateMaterial: rules subset check failed:', e);
+      }
+    }
+    return {
+      status: "ok",
+      note: "generateMaterial is not implemented yet (dummy was called). Tell the user their new practice material is being prepared.",
+    };
+  }
+
+  // Load the active song doc and its existing materials
+  let songDocRef = null;
+  let existingMaterials = [];
+
+  try {
+    let query = db.collection('users').doc(uid).collection('songLibrary')
+      .where('title', '==', songTitle);
+    if (songArtist) query = query.where('artist', '==', songArtist);
+    const songSnap = await query.limit(1).get();
+
+    if (!songSnap.empty) {
+      songDocRef = songSnap.docs[0].ref;
+      const materialsSnap = await songDocRef.collection('practiceMaterials').get();
+      existingMaterials = materialsSnap.docs.map(d => ({ ref: d.ref, ...d.data() }));
+    }
+  } catch (e) {
+    console.error('generateMaterial: failed to fetch song/materials:', e);
+  }
+
+  if (!songDocRef) {
+    return {
+      status: "ok",
+      note: "generateMaterial is not implemented yet (dummy was called). Tell the user their new practice material is being prepared.",
+    };
+  }
+
+  const preferredType = (args.preferredMaterialTypes || [])[0] || 'video';
+  const existingTitlesLower = new Set(existingMaterials.map(m => (m.title || '').toLowerCase().trim()));
+  const existingUrls = new Set(existingMaterials.map(m => m.videoUrl).filter(Boolean));
+
+  try {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+    const existingSummary = existingMaterials.length
+      ? existingMaterials.map(m => `- [${m.type}] "${m.title}"`).join('\n')
+      : '(none yet)';
+
+    const contextLine = args.requestContext ? ` The user asked: "${args.requestContext}".` : '';
+
+    // Build the rules section. When both stored and new rules exist, include both and
+    // bundle the subset check into this same call to avoid an extra round-trip.
+    let rulesSection = '';
+    let subsetCheckInstructions = '';
+    let subsetCheckJsonFields = '';
+    if (needsSubsetCheck) {
+      rulesSection = `\nStored material rules: "${storedMaterialRules}"\nNew user preference: "${args.materialRules}"`;
+      subsetCheckInstructions =
+        `\n\nAlso check if the new preference adds anything beyond the stored rules:\n` +
+        `- "rulesUpdated": false — new preference already covered, no Firestore update needed\n` +
+        `- "rulesUpdated": true and "mergedRules": "concise combined phrase" — new info found`;
+      subsetCheckJsonFields = `, "rulesUpdated": bool, "mergedRules": "..." (only if rulesUpdated)`;
+    } else if (args.materialRules) {
+      rulesSection = `\nMaterial preference: ${args.materialRules}.`;
+    } else if (storedMaterialRules) {
+      rulesSection = `\nMaterial preference: ${storedMaterialRules}.`;
+    }
+
+    const prompt = `The user is practicing "${songTitle}"${songArtist ? ` by ${songArtist}` : ''} and wants a new ${preferredType} practice resource.${contextLine}${rulesSection}
+
+Existing materials already saved for this song — do NOT duplicate any of these:
+${existingSummary}
+
+Suggest ONE new ${preferredType} resource for this specific song that is clearly distinct from the list above and matches the material preference.
+If no genuinely new resource exists, set "canFind" to false.${subsetCheckInstructions}
+
+Return ONLY a JSON object with no markdown:
+{"canFind": true, "type": "${preferredType}", "title": "specific title", "description": "one-sentence description"${subsetCheckJsonFields}}
+or
+{"canFind": false${subsetCheckJsonFields}}`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().trim();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON in Gemini response');
+
+    const suggestion = JSON.parse(jsonMatch[0]);
+
+    // Write materialRules update only if Gemini says the new preference adds information
+    if (needsSubsetCheck && suggestion.rulesUpdated && suggestion.mergedRules) {
+      try {
+        await db.collection('users').doc(uid).set(
+          { preferences: { materialRules: suggestion.mergedRules } },
+          { merge: true }
+        );
+      } catch (e) {
+        console.error('generateMaterial: materialRules merge write failed:', e);
+      }
+    }
+
+    if (!suggestion.canFind || existingTitlesLower.has((suggestion.title || '').toLowerCase().trim())) {
+      return { status: "ok", note: "sorry I really can't find new materials" };
+    }
+
+    const materialData = {
+      type: suggestion.type || preferredType,
+      title: suggestion.title,
+      description: suggestion.description || '',
+      active: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (suggestion.type === 'video' || preferredType === 'video') {
+      // Use the most up-to-date rules (merged > new > stored) so the scraper can honour them
+      const urlRules = suggestion.mergedRules || args.materialRules || storedMaterialRules || '';
+      const videoUrl = await getRealYouTubeVideo(songTitle, songArtist || '', existingUrls, urlRules);
+      if (!videoUrl) {
+        return { status: "ok", note: "sorry I really can't find new materials" };
+      }
+      materialData.videoUrl = videoUrl;
+    }
+
+    const batch = db.batch();
+    for (const m of existingMaterials) {
+      if (m.active) batch.update(m.ref, { active: false });
+    }
+    const newMatRef = songDocRef.collection('practiceMaterials').doc();
+    batch.set(newMatRef, materialData);
+    await batch.commit();
+    return { status: "ok", materialAdded: true, title: suggestion.title };
+  } catch (e) {
+    console.error('generateMaterial: Gemini suggestion failed:', e);
+    return { status: "ok", note: "sorry I really can't find new materials" };
+  }
 }
 
-function updatePlanSkill(args, uid) {
-  console.log(`[DUMMY SKILL] updatePlan called! uid=${uid} args=${JSON.stringify(args)}`);
+async function updatePlanSkill(args, uid) {
+  console.log(`[SKILL] updatePlan called! uid=${uid} args=${JSON.stringify(args)}`);
+
+  const db = admin.firestore();
+  const profilePatch = {};
+  if (args.preferredDayAndTime)     profilePatch.preferredDayAndTime     = args.preferredDayAndTime;
+  if (args.preferredSessionMinutes != null) profilePatch.preferredSessionMinutes = args.preferredSessionMinutes;
+  if (args.dayAndTimeRule)          profilePatch.DayAndTimeRule           = args.dayAndTimeRule;
+
+  if (Object.keys(profilePatch).length) {
+    try {
+      await db.collection('users').doc(uid).set({ profile: profilePatch }, { merge: true });
+    } catch (e) {
+      console.error('updatePlan Firestore write failed:', e);
+    }
+  }
+
   return {
     status: "ok",
     note: "updatePlan is not implemented yet (dummy was called). Tell the user their practice plan is being updated.",
@@ -103,7 +331,6 @@ exports.updatePlan = onCall({ cors: true, invoker: "public" }, async (request) =
 const coachSkills = {
   generateMaterial: generateMaterialSkill,
   updatePlan: updatePlanSkill,
-  searchSong: searchSongSkill,
   updateFeed: updateFeedSkill,
 };
 
@@ -111,7 +338,7 @@ const coachToolDeclarations = [
   {
     name: "generateMaterial",
     description:
-      "Generate or refresh practice material for a song — including videos, tutorials, and exercises. Call this when the user asks for a new, different, easier, or harder video, tutorial, exercise, or practice material, or says they want to change what they are practicing.",
+      "Generate or refresh practice material for a song, OR save the user's preferred material format. Call this when the user asks for a new, different, easier, or harder video, tutorial, exercise, or practice material — and also when the user expresses a format preference such as 'I prefer tabs', 'can I get a chord chart', or 'I want exercises instead of videos'.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -123,9 +350,18 @@ const coachToolDeclarations = [
           type: SchemaType.STRING,
           description: "Artist of the song, if known.",
         },
+        preferredMaterialTypes: {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING },
+          description: "Format types the user prefers, e.g. ['video', 'tabs', 'exercise', 'chordChart']. Fill this only when the user names a specific format.",
+        },
+        materialRules: {
+          type: SchemaType.STRING,
+          description: "Qualitative material preferences beyond format, e.g. 'short beginner-friendly tutorials', 'slow step-by-step explanations', 'challenging exercises'. Fill this only when the user expresses this kind of preference.",
+        },
         requestContext: {
           type: SchemaType.STRING,
-          description: "What the user asked for, e.g. 'wants an easier strumming exercise'.",
+          description: "What the user asked for, e.g. 'wants an easier strumming exercise' or 'prefers tabs over videos'.",
         },
       },
       required: ["requestContext"],
@@ -138,6 +374,18 @@ const coachToolDeclarations = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
+        preferredDayAndTime: {
+          type: SchemaType.STRING,
+          description: "The user's new preferred day and time for practice, e.g. 'Saturday 3pm' or 'weekday evenings'.",
+        },
+        preferredSessionMinutes: {
+          type: SchemaType.NUMBER,
+          description: "Preferred session duration in minutes, if the user mentions it.",
+        },
+        dayAndTimeRule: {
+          type: SchemaType.STRING,
+          description: "A plain-English scheduling rule with specific absolute dates — never relative terms like 'this Sunday' or 'next Monday'. E.g. 'skip June 21, 2026' or 'move to weekends only starting June 22, 2026'.",
+        },
         requestContext: {
           type: SchemaType.STRING,
           description: "What schedule change the user asked for, e.g. 'move practice to weekends only'.",
@@ -147,32 +395,9 @@ const coachToolDeclarations = [
     },
   },
   {
-    name: "searchSong",
-    description:
-      "Search for a song and add it to the user's song library. Call this when the user says they want to add a song, add something to their library, save a song to practice later, or says they are thinking about learning a specific song.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        title: {
-          type: SchemaType.STRING,
-          description: "Song title the user wants to add. Leave empty if the user has not named a specific song.",
-        },
-        artist: {
-          type: SchemaType.STRING,
-          description: "Artist of the song, if known.",
-        },
-        requestContext: {
-          type: SchemaType.STRING,
-          description: "What the user asked for, e.g. 'add Yellow by Coldplay to my library'.",
-        },
-      },
-      required: ["requestContext"],
-    },
-  },
-  {
     name: "updateFeed",
     description:
-      "Update the user's inspiration feed and music preferences. Call this when the user says they like or dislike an artist, band, genre, style, or type of music, or gives taste feedback that should affect recommendations.",
+      "Update the user's inspiration feed and music preferences. Call this when the user says they like or dislike an artist, band, genre, style, type of music, or song tempo, or gives taste feedback that should affect recommendations.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -195,6 +420,10 @@ const coachToolDeclarations = [
           type: SchemaType.ARRAY,
           items: { type: SchemaType.STRING },
           description: "Genres or styles the user says they dislike.",
+        },
+        tempoPreference: {
+          type: SchemaType.STRING,
+          description: "The user's song tempo preference, e.g. 'slow ballads', 'upbeat pop', 'fast rock'.",
         },
         requestContext: {
           type: SchemaType.STRING,
@@ -288,17 +517,23 @@ exports.chatWithCoach = onCall({ cors: true, invoker: "public", secrets: ["GEMIN
       activeSongContext = `The user is currently in a practice session for "${activeSongTitle}"${artistPart}.${profileContext} Focus your advice on this song and their current problem areas.`;
     } else if (fromScreen === 'sessionComplete') {
       activeSongContext = `The user just finished a practice session for "${activeSongTitle}"${artistPart}.${profileContext} They may want reflection or advice on what to work on next.`;
+    } else {
+      activeSongContext = `The user is asking about "${activeSongTitle}"${artistPart}.${profileContext} Answer their question in the context of this song.`;
     }
   }
 
+  const todayStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+
   const systemInstruction = [
     'You are an expert AI guitar coach inside the FretWise app.',
-    'Give practical, encouraging advice. Keep responses concise (2–4 sentences).',
-    'When the user asks for a new or different video, tutorial, exercise, or any practice material — including easier or harder versions — call the generateMaterial tool.',
-    'When the user wants to change, cancel, skip, or reschedule a practice session, or says they are too busy or unavailable at a certain time, call the updatePlan tool.',
-    'When the user wants to add a song to their library, save a song to practice, or is thinking about learning a specific song, call the searchSong tool.',
-    'When the user says they like or dislike an artist, band, genre, style, or type of music, call the updateFeed tool.',
-    'Never claim that material was generated, the plan was changed, a song was added, or the feed was updated unless you actually called the relevant tool in this turn.',
+    `Today is ${todayStr}.`,
+    'Keep every reply to 2–3 sentences maximum. Give one concrete, actionable step at a time — not a full plan. If there is more to cover, end with a short prompt like "Want the next step?" so the user can continue at their own pace.',
+    'Be specific to the song: name actual chords, techniques, or patterns relevant to it. Never give advice so generic it could apply to any song.',
+    'Skip filler phrases like "great question!" or "you\'ve got this!" — lead with the useful information.',
+    'When the user asks for a new or different video, tutorial, exercise, or any practice material — including easier or harder versions, a different format, or with qualitative preferences like "short" or "beginner-friendly" — call the generateMaterial tool. Pass preferredMaterialTypes when the user names a format (e.g. tabs, video); pass materialRules when the user describes qualitative preferences (e.g. "easy short tutorials"). If the tool response contains a "note" field, relay it verbatim to the user; otherwise include a brief helpful tip in your text reply.',
+    'When the user wants to change, cancel, skip, or reschedule a practice session, or says they are too busy or unavailable at a certain time, call the updatePlan tool. Always resolve relative date references (e.g. "this Sunday", "next Monday") to specific calendar dates using today\'s date before filling dayAndTimeRule. Then confirm the change in your text reply.',
+    'When the user says they like or dislike an artist, band, genre, style, type of music, or song tempo — call the updateFeed tool, then acknowledge their taste in your text reply.',
+    'Never claim that material was generated, the plan was changed, or the feed was updated unless you actually called the relevant tool in this turn.',
     userProfileContext,
     libraryContext,
     activeSongContext,
@@ -337,7 +572,7 @@ exports.chatWithCoach = onCall({ cors: true, invoker: "public", secrets: ["GEMIN
           const skill = coachSkills[call.name];
           skillsCalled.push(call.name);
           const response = skill
-            ? await skill(call.args || {}, uid)
+            ? await skill(call.args || {}, uid, { fromScreen, activeSongTitle, activeSongArtist })
             : { status: "error", note: `Unknown skill: ${call.name}` };
           return { functionResponse: { name: call.name, response } };
         }));
@@ -365,6 +600,21 @@ async function updateFeedSkill(args, uid) {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const db = admin.firestore();
     const feedCol = db.collection('users').doc(uid).collection('feed');
+
+    // Write music preferences extracted by the AI coach
+    try {
+      const prefPatch = {};
+      if (args.likedArtists?.length)    prefPatch.favoriteArtists  = admin.firestore.FieldValue.arrayUnion(...args.likedArtists);
+      if (args.dislikedArtists?.length) prefPatch.dislikedArtists  = admin.firestore.FieldValue.arrayUnion(...args.dislikedArtists);
+      if (args.likedGenres?.length)     prefPatch.favoriteGenres   = admin.firestore.FieldValue.arrayUnion(...args.likedGenres);
+      if (args.dislikedGenres?.length)  prefPatch.dislikedGenres   = admin.firestore.FieldValue.arrayUnion(...args.dislikedGenres);
+      if (args.tempoPreference)         prefPatch.tempoPreference  = args.tempoPreference;
+      if (Object.keys(prefPatch).length) {
+        await db.collection('users').doc(uid).set({ preferences: prefPatch }, { merge: true });
+      }
+    } catch (e) {
+      console.error('updateFeed preference write failed:', e);
+    }
 
     try {
       // 🚨 這裡已經刪除「清空資料庫」的邏輯，現在會無限往後加！
