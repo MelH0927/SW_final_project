@@ -397,7 +397,14 @@ class _CalendarScreenState extends State<CalendarScreen>
     print("開始將 Fretwise 課表同步到內建行事曆...");
     try {
       final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        print("使用者未登入，無法同步");
+        return;
+      }
+      
+      print("正在從 Firestore 抓取本次產生的 Practice Tasks (planId: $planId)...");
+      // 因為後端剛寫入 Firestore，給它 1 秒的同步時間
+      await Future.delayed(const Duration(seconds: 1));
       
       final tasksSnap = await FirebaseFirestore.instance
           .collection('users')
@@ -407,11 +414,13 @@ class _CalendarScreenState extends State<CalendarScreen>
           .get();
           
       if (tasksSnap.docs.isEmpty) {
-        print("沒有找到對應的任務，跳過同步");
+        print("沒有找到對應的任務 (可能 Firestore 還沒同步過來)，跳過同步");
         return;
       }
+      print("成功抓到 \${tasksSnap.docs.length} 個任務，準備寫入日曆...");
 
       // 取得日曆列表，尋找第一個可寫入的日曆
+      print("正在取得手機的日曆列表...");
       final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
       if (!calendarsResult.isSuccess || calendarsResult.data == null) {
         print("無法取得裝置行事曆");
@@ -426,13 +435,14 @@ class _CalendarScreenState extends State<CalendarScreen>
       
       // 預設寫入第一個可寫的日曆
       final targetCalendar = writableCalendars.first;
-      print("將寫入目標日曆：\${targetCalendar.name}");
+      print("將寫入目標日曆：\${targetCalendar.name} (ID: \${targetCalendar.id})");
       
       final currentLocation = tz.getLocation('Asia/Taipei');
       final startDate = tz.TZDateTime.now(currentLocation).subtract(const Duration(days: 1));
       final endDate = startDate.add(const Duration(days: 35));
 
       // 1. 先把舊的 [Fretwise] 行程清掉
+      print("正在清理過去的 [Fretwise] 舊行程...");
       final eventsResult = await _deviceCalendarPlugin.retrieveEvents(
         targetCalendar.id,
         RetrieveEventsParams(startDate: startDate, endDate: endDate),
@@ -445,10 +455,13 @@ class _CalendarScreenState extends State<CalendarScreen>
           }
         }
       }
+      print("舊行程清理完畢。");
       
       // 2. 新增每個 task
+      print("開始逐一寫入新的練習行程...");
       int addedCount = 0;
-      for (var doc in tasksSnap.docs) {
+      for (var i = 0; i < tasksSnap.docs.length; i++) {
+        final doc = tasksSnap.docs[i];
         final data = doc.data();
         final title = data['title'] ?? 'Practice';
         final minutes = data['minutes'] ?? 20;
@@ -473,12 +486,17 @@ class _CalendarScreenState extends State<CalendarScreen>
           );
           
           final createResult = await _deviceCalendarPlugin.createOrUpdateEvent(event);
-          if (createResult?.isSuccess == true) addedCount++;
+          if (createResult?.isSuccess == true) {
+            addedCount++;
+            print("  -> 成功寫入：\${dayId} 的 $title");
+          } else {
+            print("  -> 寫入失敗：\${dayId} (\${createResult?.errors.map((e) => e.errorMessage).join(', ')})");
+          }
         }
       }
       print("同步內建行事曆完成！共寫入 $addedCount 個行程");
     } catch (e) {
-      print("同步內建行事曆失敗：$e");
+      print("同步內建行事曆發生例外錯誤：$e");
     }
   }
 
