@@ -203,8 +203,16 @@ async function updatePlanSkill(args, uid) {
     let text;
   try {
       // 2. Read user data from Firestore
-      const userDoc = await db.collection("users").doc(uid).get();
-      const userData = userDoc.exists ? userDoc.data() : {};
+      const userDocRef = db.collection("users").doc(uid);
+      const userDoc = await userDocRef.get();
+      let userData = userDoc.exists ? userDoc.data() : {};
+
+      // If the AI coach passed a requestContext, save it as DayAndTimeRule in Firestore
+      if (args.requestContext) {
+        userData.DayAndTimeRule = args.requestContext;
+        await userDocRef.set({ DayAndTimeRule: args.requestContext }, { merge: true });
+        logger.info("Updated DayAndTimeRule from coach requestContext", { rule: args.requestContext });
+      }
 
       const profile = userData.profile || {
         skillLevel: "beginner",
