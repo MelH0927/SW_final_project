@@ -1232,7 +1232,9 @@ class _CalendarScreenState extends State<CalendarScreen>
                                       ? Colors.white
                                       : (bgColor == Colors.transparent
                                             ? t.text
-                                            : Colors.white);
+                                            : (bgColor == t.accent && !isToday 
+                                                ? t.accent 
+                                                : Colors.white));
                                   final border =
                                       bgColor != Colors.transparent && !isToday;
 
